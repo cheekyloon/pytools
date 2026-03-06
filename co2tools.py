@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 
 ###### import modules
-import os
+#import os
 import gsw
 import co2sys
 import mitgcm_tools
 import numpy     as np
 import xarray    as xr
-from utils   import resolve_nc
-from utils   import open_nc
-from utils   import pick_time
+from .utils   import resolve_nc
+from .utils   import open_nc
+from .utils   import pick_time
 #from scipy   import ndimage as nd
 from sklearn import linear_model
 
@@ -222,7 +222,7 @@ def get_pSi(
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
 
     # --- load dic diagnostics
-    dic_path = resolve_nc(dirF, dic_file, "oceDiag.glob.nc")
+    dic_path = resolve_nc(dirF, dic_file, "dicDiag.glob.nc")
     dicdiag = open_nc(
         dic_path,
         strange_axes={"Zmd000029": "ZC"},

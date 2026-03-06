@@ -5,11 +5,11 @@
 import mitgcm_tools
 import numpy             as np
 import xarray            as xr
-import diagtools         as dg
 import MITgcmutils.jmd95 as jmd95
-from utils   import resolve_nc
-from utils   import open_nc
-from utils   import pick_time
+from .utils   import resolve_nc
+from .utils   import open_nc
+from .utils   import pick_time
+from .utils   import join
 
 def load_ice_lat(dir_exp, indT,ilon):
     """
@@ -244,7 +244,7 @@ def gen_potdens(
     # -------------------------
     oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
     ocediag = open_nc(
-        dg.join(dirF, oce_file),
+        join(dirF, oce_file),
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid,
     )

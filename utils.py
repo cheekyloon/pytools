@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 
-import numpy as np
 import sys
+import os
+import xarray as xr
+import numpy  as np
+import mitgcm_tools
 
 def write_to_binary(data, fileout, precision='double'):
     """
