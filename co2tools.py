@@ -7,7 +7,10 @@ import co2sys
 import mitgcm_tools
 import numpy     as np
 import xarray    as xr
-from scipy   import ndimage as nd
+from utils   import resolve_nc
+from utils   import open_nc
+from utils   import pick_time
+#from scipy   import ndimage as nd
 from sklearn import linear_model
 
 def getPdbar(
@@ -54,7 +57,7 @@ def getPdbar(
     elif flag == 1:
         # Load ocean variables needed for hydrostatic pressure
         oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
-        ocediag = dg.open_nc(
+        ocediag = open_nc(
             oce_path,
             strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
             grid=grid
@@ -220,7 +223,7 @@ def get_pSi(
 
     # --- load dic diagnostics
     dic_path = resolve_nc(dirF, dic_file, "oceDiag.glob.nc")
-    dicdiag = dg.open_nc(
+    dicdiag = open_nc(
         dic_path,
         strange_axes={"Zmd000029": "ZC"},
         grid=grid
@@ -274,7 +277,7 @@ def get_pSi_AOU(dirF, indT, dirS=None, dirT=None):
     ### load O2 in (mol/m3) 
     O2       = dicdiag.TRAC05.isel(T=indT) 
     ### Compute saturated O2
-    O2sat    = dg.satO2(dirS, indT, dirT)
+    O2sat    = satO2(dirS, indT, dirT)
     ### compute preformed silicate
     #pSi      = grid.HFacC * (sil - (15/170) * (O2 - O2sat))
     pSi      = grid.HFacC * (sil - (15/170) * (O2sat - O2))
@@ -337,18 +340,18 @@ def get_Csat(dirF, indT, AOU=False, dirT=None, dirS=None, pco2=None):
        PO4  = dicdiag.TRAC03.isel(T=indT) 
        O2   = dicdiag.TRAC05.isel(T=indT)
        ### Compute saturated O2
-       O2sat = dg.satO2(dirF, indT)
+       O2sat = satO2(dirF, indT)
        ### Compute AOU 
        AOU = O2sat - O2
        ### Compute preformed alkalinity with AOU estimate
        ### convert mol/m3 to umol/kg 
-       a1,a2,a3 = dg.MRL_alk(dirF, indT)
+       a1,a2,a3 = MRL_alk(dirF, indT)
        pAT  = permumolkg * (a1 + a2 * S + a3 * (O2 + 170 * PO4))
        ### compute preformed PO4 in (mol/m3)
        pPO4 = permumolkg * (PO4 - (1/170) * AOU)
        ### compute preformed silicate in (mol/m3)
        ### convert mol/m3 to umol/kg 
-       pSi  = permumolkg * dg.get_pSi_AOU(dirF, indT)
+       pSi  = permumolkg * get_pSi_AOU(dirF, indT)
     ### preformed tracers 
     else: 
        ### load preformed Alkalinity and preformed PO4 in (mol/m3)
@@ -357,9 +360,9 @@ def get_Csat(dirF, indT, AOU=False, dirT=None, dirS=None, pco2=None):
        pPO4  = permumolkg * dicdiag.TRAC08.isel(T=indT) 
        ### compute preformed silicate in (mol/m3)
        ### convert mol/m3 to umol/kg 
-       pSi  = permumolkg * dg.get_pSi(dirF, indT)
+       pSi  = permumolkg * get_pSi(dirF, indT)
     ### compute pressure in dbar
-    Pdbar = dg.getPdbar(dirF,0) + 10.1325 #absolute pressure
+    Pdbar = getPdbar(dirF,0) + 10.1325 #absolute pressure
     ### extract pco2 and convert from atm to uatm 
     if pco2 is None:
        pCO2 = 1e6 * surfdiag.DICATCO2.isel(T=indT,YC=0,XC=0).values
@@ -368,7 +371,7 @@ def get_Csat(dirF, indT, AOU=False, dirT=None, dirS=None, pco2=None):
     ### compute saturated DIC (umol/kg)
     #co = co2sys.CarbonateSystem(temp=PT, salt=S, pres=Pdbar, temp_out=PT, pres_out=Pdbar, TA=preAlk, pCO2=pCO2, PO4=prePO4, Si=presi)
     #TC = hfacc * co.TC
-    Csat = grid.HFacC * dg.calc_carbon(pCO2, pAT, pPO4, pSi, T, S, Pdbar)/permumolkg
+    Csat = grid.HFacC * calc_carbon(pCO2, pAT, pPO4, pSi, T, S, Pdbar)/permumolkg
  
     return Csat
 
@@ -461,35 +464,35 @@ def get_Csat_Part(
     # Load diagnostics
     # -------------------------
     oce_path_ctrl = resolve_nc(dir_oce_ctrl, oce_file, "oceDiag.glob.nc")
-    ocediag_ctrl = dg.open_nc(
+    ocediag_ctrl = open_nc(
         oce_path_ctrl,
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid
     )
 
     T_path = resolve_nc(dirT, oce_file, "oceDiag.glob.nc")
-    ocediagT = dg.open_nc(
+    ocediagT = open_nc(
         T_path,
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid
     )
 
     S_path = resolve_nc(dirS, oce_file, "oceDiag.glob.nc")
-    ocediagS = dg.open_nc(
+    ocediagS = open_nc(
         S_path,
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid
     )
 
     dic_path_ctrl = resolve_nc(dir_ctrl, dic_file, "dicDiag.glob.nc")
-    dicdiag_ctrl = dg.open_nc(
+    dicdiag_ctrl = open_nc(
         dic_path_ctrl,
         strange_axes={"Zmd000029": "ZC"},
         grid=grid
     )
 
     dic_path_exp = resolve_nc(dir_exp, dic_file, "dicDiag.glob.nc")
-    dicdiag_exp = dg.open_nc(
+    dicdiag_exp = open_nc(
         dic_path_exp,
         strange_axes={"Zmd000029": "ZC"},
         grid=grid
@@ -500,14 +503,14 @@ def get_Csat_Part(
     dicdiag_exp.coords["YC"] = grid.YC
 
     surf_path_ctrl = resolve_nc(dir_ctrl, surf_file, "surfDiag.glob.nc")
-    surfdiag_ctrl = dg.open_nc(
+    surfdiag_ctrl = open_nc(
         surf_path_ctrl,
         strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
         grid=grid
     )
 
     surf_path_exp = resolve_nc(dir_exp, surf_file, "surfDiag.glob.nc")
-    surfdiag_exp = dg.open_nc(
+    surfdiag_exp = open_nc(
         surf_path_exp,
         strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
         grid=grid
@@ -534,8 +537,8 @@ def get_Csat_Part(
     # -------------------------
     # Pressure (dbar)
     # -------------------------
-    Pdbar_ctrl = dg.getPdbar(dir_ctrl, 0) + 10.1325
-    Pdbar      = dg.getPdbar(dir_exp,  0) + 10.1325
+    Pdbar_ctrl = getPdbar(dir_ctrl, 0) + 10.1325
+    Pdbar      = getPdbar(dir_exp,  0) + 10.1325
 
     # -------------------------
     # pCO2 (uatm)
@@ -556,20 +559,20 @@ def get_Csat_Part(
     # -------------------------
     # Preformed silicate (mol/m3 -> umol/kg)
     # -------------------------
-    pSi_ctrl = permumolkg * dg.get_pSi(dir_ctrl)
-    pSi      = permumolkg * dg.get_pSi(dir_exp)
+    pSi_ctrl = permumolkg * get_pSi(dir_ctrl)
+    pSi      = permumolkg * get_pSi(dir_exp)
 
     # -------------------------
     # Saturation DIC (umol/kg) -> convert back to mol/m3 using /permumolkg
     # -------------------------
-    Csat_ctrl = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
-    Csat      = grid.HFacC * dg.calc_carbon(pCO2,      pAT,     pPO4,     pSi,      T,     S,     Pdbar)      / permumolkg
+    Csat_ctrl = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
+    Csat      = grid.HFacC * calc_carbon(pCO2,      pAT,     pPO4,     pSi,      T,     S,     Pdbar)      / permumolkg
 
-    Csat_278  = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pAT,     pPO4,     pSi,      T,     S,     Pdbar)      / permumolkg
-    Csat_pCO2 = grid.HFacC * dg.calc_carbon(pCO2,      pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
-    Csat_pAT  = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pAT,     pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
-    Csat_T    = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, T,     Sctrl, Pdbar_ctrl) / permumolkg
-    Csat_S    = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, S,     Pdbar_ctrl) / permumolkg
+    Csat_278  = grid.HFacC * calc_carbon(pCO2_ctrl, pAT,     pPO4,     pSi,      T,     S,     Pdbar)      / permumolkg
+    Csat_pCO2 = grid.HFacC * calc_carbon(pCO2,      pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
+    Csat_pAT  = grid.HFacC * calc_carbon(pCO2_ctrl, pAT,     pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) / permumolkg
+    Csat_T    = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, T,     Sctrl, Pdbar_ctrl) / permumolkg
+    Csat_S    = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, S,     Pdbar_ctrl) / permumolkg
 
     return Csat_ctrl, Csat, Csat_278, Csat_pCO2, Csat_pAT, Csat_T, Csat_S
 
@@ -644,9 +647,9 @@ def get_Csat_Part_AOU(dir_ctrl, dir_exp, dirT, dirS, indTctrl, indT=None, indTT=
     PO4           = dicdiag_exp.TRAC03.isel(T=indT) 
     O2            = dicdiag_exp.TRAC05.isel(T=indT) 
     # Compute saturated O2 
-    # I should update dg.satO2 to include variations in indT for T and S
-    O2satctrl     = dg.satO2(dir_ctrl, indT)
-    O2sat         = dg.satO2(dirS, indT, dirT)
+    # I should update satO2 to include variations in indT for T and S
+    O2satctrl     = satO2(dir_ctrl, indT)
+    O2sat         = satO2(dirS, indT, dirT)
     ### Compute AOU 
     AOUctrl       = O2satctrl - O2ctrl
     AOU           = O2sat - O2
@@ -655,30 +658,30 @@ def get_Csat_Part_AOU(dir_ctrl, dir_exp, dirT, dirS, indTctrl, indT=None, indTT=
     pPO4     = permumolkg * (PO4 - (1/170) * AOU)
     ### Compute preformed alkalinity with AOU estimate
     ### convert mol/m3 to umol/kg 
-    a1,a2,a3 = dg.MRL_alk(dir_ctrl, indT)
+    a1,a2,a3 = MRL_alk(dir_ctrl, indT)
     pATctrl  = permumolkg * (a1 + a2 * Sctrl + a3 * (O2ctrl + 170 * PO4ctrl))
-    a4,a5,a6 = dg.MRL_alk(dir_exp, indT, dirS)
+    a4,a5,a6 = MRL_alk(dir_exp, indT, dirS)
     pAT      = permumolkg * (a4 + a5 * S + a6 * (O2 + 170 * PO4))
     ### compute absolute pressure in dbar
-    Pdbar_ctrl    = dg.getPdbar(dir_ctrl,0) + 10.1325 
-    Pdbar         = dg.getPdbar(dir_exp,0) + 10.1325 
-    #Pdbar_ctrl    = dg.getPdbar(dir_ctrl,1) 
-    #Pdbar         = dg.getPdbar(dir_exp,1) 
+    Pdbar_ctrl    = getPdbar(dir_ctrl,0) + 10.1325 
+    Pdbar         = getPdbar(dir_exp,0) + 10.1325 
+    #Pdbar_ctrl    = getPdbar(dir_ctrl,1) 
+    #Pdbar         = getPdbar(dir_exp,1) 
     ### extract pco2 and convert from atm to uatm 
     pCO2_ctrl     = 1e6 * surfdiag_ctrl.DICATCO2.isel(T=indTctrl,YC=0,XC=0).values 
     pCO2          = 1e6 * surfdiag_exp.DICATCO2.isel(T=indT,YC=0,XC=0).values 
     ### compute preformed silicate in (mol/m3)
     ### convert mol/m3 to umol/kg 
-    pSi_ctrl      = permumolkg * dg.get_pSi_AOU(dir_ctrl, indTctrl)
-    pSi           = permumolkg * dg.get_pSi_AOU(dir_exp, indT, dirS, dirT)
+    pSi_ctrl      = permumolkg * get_pSi_AOU(dir_ctrl, indTctrl)
+    pSi           = permumolkg * get_pSi_AOU(dir_exp, indT, dirS, dirT)
     ### compute saturated DIC (umol/kg)
-    Csat_ctrl     = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
-    Csat          = grid.HFacC * dg.calc_carbon(pCO2,      pAT,     pPO4,     pSi,      T,     S,     Pdbar)      /permumolkg
-    Csat_278      = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pAT,     pPO4,     pSi,      T,     S,     Pdbar)      /permumolkg
-    Csat_pCO2     = grid.HFacC * dg.calc_carbon(pCO2,      pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
-    Csat_pAT      = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pAT,     pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
-    Csat_T        = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, T,     Sctrl, Pdbar_ctrl) /permumolkg
-    Csat_S        = grid.HFacC * dg.calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, S,     Pdbar_ctrl) /permumolkg
+    Csat_ctrl     = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
+    Csat          = grid.HFacC * calc_carbon(pCO2,      pAT,     pPO4,     pSi,      T,     S,     Pdbar)      /permumolkg
+    Csat_278      = grid.HFacC * calc_carbon(pCO2_ctrl, pAT,     pPO4,     pSi,      T,     S,     Pdbar)      /permumolkg
+    Csat_pCO2     = grid.HFacC * calc_carbon(pCO2,      pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
+    Csat_pAT      = grid.HFacC * calc_carbon(pCO2_ctrl, pAT,     pPO4ctrl, pSi_ctrl, Tctrl, Sctrl, Pdbar_ctrl) /permumolkg
+    Csat_T        = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, T,     Sctrl, Pdbar_ctrl) /permumolkg
+    Csat_S        = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, S,     Pdbar_ctrl) /permumolkg
 
     return Csat_ctrl, Csat, Csat_278, Csat_pCO2, Csat_pAT, Csat_T, Csat_S
 
@@ -719,23 +722,23 @@ def get_Csoft(
         Rcp = 117.0
 
     # Resolve filenames (Dryad vs legacy)
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
-    dic_path  = dg.resolve_nc(dirF, dic_file,  "dicDiag.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    dic_path  = resolve_nc(dirF, dic_file,  "dicDiag.glob.nc")
 
     # Load grid
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
     grid.close()
 
-    # Load dic diagnostics (works for both formats via dg.open_nc)
-    dicdiag = dg.open_nc(dic_path, strange_axes={"Zmd000029": "ZC"}, grid=grid)
+    # Load dic diagnostics (works for both formats via open_nc)
+    dicdiag = open_nc(dic_path, strange_axes={"Zmd000029": "ZC"}, grid=grid)
     dicdiag.close()
 
     # Make sure YC coordinate matches grid
     dicdiag = dicdiag.assign_coords(YC=grid.YC)
 
     # Extract PO4 and preformed PO4 (mol/m3)
-    PO4  = dg.pick_time(dicdiag.TRAC03, indT)
-    pPO4 = dg.pick_time(dicdiag.TRAC08, indT)
+    PO4  = pick_time(dicdiag.TRAC03, indT)
+    pPO4 = pick_time(dicdiag.TRAC08, indT)
 
     # Csoft = HFacC * Rcp * (PO4 - pPO4)
     Csoft = grid.HFacC * (Rcp * (PO4 - pPO4))
@@ -777,7 +780,7 @@ def get_Csoft_AOU(dirF, indT, dirS=None, dirT=None, Rco=None):
     # load O2 (mol/m3)
     O2   = dicdiag.TRAC05.isel(T=indT) 
     # Compute saturated O2
-    O2sat = dg.satO2(dirS, indT, dirT)
+    O2sat = satO2(dirS, indT, dirT)
     ### Compute AOU 
     AOU   = O2sat - O2
     ### Compute Csoft 
@@ -818,25 +821,25 @@ def get_Ccarb(
         Carbonate contribution (mol/m3), typically on (ZC, YC, XC).
     """
     # Resolve filenames (Dryad vs legacy)
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
-    dic_path  = dg.resolve_nc(dirF, dic_file,  "dicDiag.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    dic_path  = resolve_nc(dirF, dic_file,  "dicDiag.glob.nc")
 
     # Load grid
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
     grid.close()
 
-    # Load dic diagnostics (works for both formats via dg.open_nc)
-    dicdiag = dg.open_nc(dic_path, strange_axes={"Zmd000029": "ZC"}, grid=grid)
+    # Load dic diagnostics (works for both formats via open_nc)
+    dicdiag = open_nc(dic_path, strange_axes={"Zmd000029": "ZC"}, grid=grid)
     dicdiag.close()
 
     # Make sure YC coordinate matches grid
     dicdiag = dicdiag.assign_coords(YC=grid.YC)
 
     # Load tracers (mol/m3)
-    Alk  = dg.pick_time(dicdiag.TRAC02, indT)
-    pAlk = dg.pick_time(dicdiag.TRAC07, indT)
-    PO4  = dg.pick_time(dicdiag.TRAC03, indT)
-    pPO4 = dg.pick_time(dicdiag.TRAC08, indT)
+    Alk  = pick_time(dicdiag.TRAC02, indT)
+    pAlk = pick_time(dicdiag.TRAC07, indT)
+    PO4  = pick_time(dicdiag.TRAC03, indT)
+    pPO4 = pick_time(dicdiag.TRAC08, indT)
 
     # Carbonate contribution:
     # Ccarb = 0.5 * HFacC * (Alk - pAlk + 16 * (PO4 - pPO4))
@@ -884,11 +887,11 @@ def get_Ccarb_AOU(dirF, indT, dirS=None, dirT=None):
     PO4      = dicdiag.TRAC03.isel(T=indT) 
     O2       = dicdiag.TRAC05.isel(T=indT) 
     ### Compute saturated O2
-    O2sat    = dg.satO2(dirS, indT, dirT)
+    O2sat    = satO2(dirS, indT, dirT)
     ### Compute AOU 
     AOU      = O2sat - O2
     ### Compute preformed alkalinity with AOU estimate
-    a1,a2,a3 = dg.MRL_alk(dirF, indT, dirS)
+    a1,a2,a3 = MRL_alk(dirF, indT, dirS)
     pAlk_aou = grid['HFacC'] * (a1 + a2 * S + a3 * (O2 + 170 * PO4))
     ### Compute Ccarb
     Ccarb    = (1/2) * grid['HFacC'] * (Alk - pAlk_aou + (16/170) * AOU)

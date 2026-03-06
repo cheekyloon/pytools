@@ -1,13 +1,15 @@
 #!/usr/bin/env python 
 
 ### import modules
+#import xgcm
+import mitgcm_tools
 import numpy             as np
 import xarray            as xr
 import diagtools         as dg
 import MITgcmutils.jmd95 as jmd95
-import netCDF4           as nc4
-import mitgcm_tools
-import xgcm
+from utils   import resolve_nc
+from utils   import open_nc
+from utils   import pick_time
 
 def load_ice_lat(dir_exp, indT,ilon):
     """
@@ -163,14 +165,14 @@ def gen_vel(
     # -------------------------
     # Load grid 
     # -------------------------
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
 
     # -------------------------
     # Load ocean diagnostics
     # -------------------------
-    oce_path = dg.resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
-    ocediag = dg.open_nc(
+    oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+    ocediag = open_nc(
         oce_path,
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid,
@@ -180,8 +182,8 @@ def gen_vel(
     # -------------------------
     # Select time safely (works whether 'T' exists or not)
     # -------------------------
-    psiY = dg.pick_time(ocediag.GM_PsiY, indT)
-    vvel = dg.pick_time(ocediag.VVELMASS, indT)
+    psiY = pick_time(ocediag.GM_PsiY, indT)
+    vvel = pick_time(ocediag.VVELMASS, indT)
 
     # -------------------------
     # Compute bolus velocity (GM) and residual velocity
@@ -234,14 +236,14 @@ def gen_potdens(
     # -------------------------
     # Load grid 
     # -------------------------
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
 
     # -------------------------
     # Load ocean diagnostics 
     # -------------------------
-    oce_path = dg.resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
-    ocediag = dg.open_nc(
+    oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+    ocediag = open_nc(
         dg.join(dirF, oce_file),
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid,
@@ -251,8 +253,8 @@ def gen_potdens(
     # -------------------------
     # Select time safely (works with or without 'T')
     # -------------------------
-    S = dg.pick_time(ocediag.SALT, indT)
-    T = dg.pick_time(ocediag.THETA, indT)
+    S = pick_time(ocediag.SALT, indT)
+    T = pick_time(ocediag.THETA, indT)
 
     # -------------------------
     # Compute sigma = rho - 1000
@@ -430,7 +432,7 @@ def gen_rocsig2B(
     # -------------------------
     # Load grid (nc first, fallback to glob.nc via resolve_nc)
     # -------------------------
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
     grid.close()
 
@@ -465,14 +467,14 @@ def gen_rocsig2B(
         VELO_da = vgm_da
     elif flag_roc == 1:
         # Load Eulerian meridional velocity from oceDiag
-        oce_path = dg.resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
-        ocediag = dg.open_nc(
+        oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+        ocediag = open_nc(
             oce_path,
             strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
             grid=grid,
         )
         ocediag.close()
-        VELO_da = dg.pick_time(ocediag.VVELMASS, indT)
+        VELO_da = pick_time(ocediag.VVELMASS, indT)
     else:
         raise ValueError("flag_roc must be 0 (vres), 1 (v), or 2 (vgm).")
 
@@ -614,7 +616,7 @@ def gen_rocsig2B_SO(
     # -------------------------
     # Load grid (nc first, fallback to glob.nc via resolve_nc)
     # -------------------------
-    grid_path = dg.resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
     grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
     grid.close()
 
@@ -633,13 +635,13 @@ def gen_rocsig2B_SO(
     nx = sigma.shape[2]
 
     # --- load MLD
-    surf_path = dg.resolve_nc(dirF, surf_file, "surfDiag.glob.nc")
-    surfdiag  = dg.open_nc(
+    surf_path = resolve_nc(dirF, surf_file, "surfDiag.glob.nc")
+    surfdiag  = open_nc(
         surf_path,
         strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
         grid=grid
     )
-    MLD = dg.pick_time(surfdiag.MXLDEPTH, indT)
+    MLD = pick_time(surfdiag.MXLDEPTH, indT)
     surfdiag.close()
 
     # --- build masks
@@ -667,14 +669,14 @@ def gen_rocsig2B_SO(
         VELO_da = vgm_da
     elif flag_roc == 1:
         # Load Eulerian meridional velocity from oceDiag
-        oce_path = dg.resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
-        ocediag = dg.open_nc(
+        oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+        ocediag = open_nc(
             oce_path,
             strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
             grid=grid,
         )
         ocediag.close()
-        VELO_da = dg.pick_time(ocediag.VVELMASS, indT)
+        VELO_da = pick_time(ocediag.VVELMASS, indT)
     else:
         raise ValueError("flag_roc must be 0 (vres), 1 (v), or 2 (vgm).")
 
