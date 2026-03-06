@@ -9,6 +9,46 @@ import netCDF4           as nc4
 import mitgcm_tools
 import xgcm
 
+def load_ice_lat(dir_exp, indT,ilon):
+    """
+    extract the maximum latitude of the zonal-averaged 
+    sea ice edge in the South Hemisphere (lats)
+    and the North Atlantic (latn)
+    return lats and latn 
+
+    :param:
+    dir_exp: directory path 
+    ...indT: time index 
+    ...ilon: longitude index for Africa 
+
+    :return:
+    lats: latitude of the sea-ice in SH
+    latn: latitude of the sea-ice in NATL
+    """
+    ### load grid
+    grid, xgrid = mitgcm_tools.loadgrid(dir_exp + 'grid.glob.nc', basin_masks=False)
+    grid.close()
+    ### load ice fraction
+    seaice = mitgcm_tools.open_ncfile(dir_exp + 'iceDiag.glob.nc',\
+        strange_axes={'Zmd000001':'ZC','Zd000001':'ZL'},grid=grid)['SIarea'].isel(T=indT)
+    # Mask where there is no ice
+    seaice = seaice.where(seaice > 0)
+    # Find latitude of ice in SH
+    # Mean over longitude (XC axis)
+    ZAI_SH = seaice.mean(dim='XC')
+    lats   = ZAI_SH.isel(YC=slice(0, 35)).where(ZAI_SH > 0, drop=True).YC.max().item()
+    # Find latitude of ice in NATL 
+    # Mean over longitude (restricted to ilon)
+    ZAI_NATL       = seaice.isel(XC=slice(0, ilon)).mean(dim='XC')
+    ZAI_NATL_north = ZAI_NATL.isel(YC=slice(35, None)).where(ZAI_NATL > 0, drop=True)
+    if ZAI_NATL_north.size > 0:
+        latn = ZAI_NATL_north.YC.min().item()
+    else:
+        # Default to last latitude if no ice
+        latn =  grid.YC.isel(YC=-1)
+
+    return lats, latn
+
 def gen_BL(indT, rho0, Pref, dir_exp):
     """
     compute the buoyancy loss 
