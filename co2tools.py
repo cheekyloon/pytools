@@ -75,63 +75,109 @@ def getPdbar(
 
     return grid.HFacC * Pdbar
 
-def satO2(dirS, indT, dirT=None):
-    """Compute oxygen saturation from temperature and salinity
-    Oxygen saturation value is the volume of oxygen gas absorbed from humidity-saturated
-    air at a total pressure of one atmosphere, per unit volume of the liquid at the temperature
-    of measurement (ml/l)
-    :param:
-    .dirS: work directory for salinity 
-    .indT: time index 
-    .dirT: work directory for temperature
+def get_satO2(
+    dirS,
+    indT: int | None = -1,
+    dirT=None,
+    grid_file="grid.nc",
+    oce_file="oceDiag.nc",
+):
+    """
+    Compute oxygen saturation from temperature and salinity.
 
-    :return:
-    satO2: Saturation concentration of dissolved O2 (units="mol/m3", shape (Z,Y,X))
+    Supports:
+      - time-series files with dimension "T"
+      - snapshot files without time axis
+
+    Parameters
+    ----------
+    dirS : str
+        Directory containing salinity diagnostics and grid.
+    indT : int or None
+        Time index if 'T' dimension exists. Ignored if no 'T'.
+    dirT : str or None
+        Directory containing temperature diagnostics. If None, uses dirS.
+    grid_file : str
+        Grid filename, e.g. "grid.nc" or legacy "grid.glob.nc".
+    oce_file : str
+        Ocean diagnostics filename, e.g. "oceDiag.nc" or legacy "oceDiag.glob.nc".
+
+    Returns
+    -------
+    satO2 : xarray.DataArray
+        Saturation concentration of dissolved O2, in mol/m3, shape (Z, Y, X).
     """
 
-    # Assign defaults if not provided
     if dirT is None:
-        dirT  = dirS
+        dirT = dirS
 
-    ### load grid
-    grid, xgrid = mitgcm_tools.loadgrid(dirS + 'grid.glob.nc', basin_masks=False)
-    grid.close()
-    ### load arrays
-    ocediagS    = mitgcm_tools.open_ncfile(dirS + 'oceDiag.glob.nc',\
-      strange_axes={'Zmd000029':'ZC','Zld000029':'ZL'},grid=grid)
-    ocediagS.close()
-    ocediagT    = mitgcm_tools.open_ncfile(dirT + 'oceDiag.glob.nc',\
-      strange_axes={'Zmd000029':'ZC','Zld000029':'ZL'},grid=grid)
-    ocediagT.close()
-    ### load salinity and theta
-    S   = ocediagS.SALT.isel(T=indT) 
-    T   = ocediagT.THETA.isel(T=indT) 
+    # --- load grid
+    grid_path = resolve_nc(dirS, grid_file, "grid.glob.nc")
+    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
 
-    oA0   =  2.00907
-    oA1   =  3.22014
-    oA2   =  4.05010
-    oA3   =  4.94457
-    oA4   = -2.56847E-1
-    oA5   =  3.88767
-    oB0   = -6.24523E-3
-    oB1   = -7.37614E-3
-    oB2   = -1.03410E-2
-    oB3   = -8.17083E-3
-    oC0   = -4.88682E-7
+    # --- load salinity diagnostics
+    oceS_path = resolve_nc(dirS, oce_file, "oceDiag.glob.nc")
+    oceS = open_nc(
+        oceS_path,
+        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid
+    )
 
-    aTT   = 298.15-T
-    aTK   = 273.15+T
-    aTS   = np.log(aTT/aTK)
-    aTS2  = aTS*aTS
-    aTS3  = aTS2*aTS
-    aTS4  = aTS3*aTS
-    aTS5  = aTS4*aTS
+    # --- load temperature diagnostics
+    oceT_path = resolve_nc(dirT, oce_file, "oceDiag.glob.nc")
+    oceT = open_nc(
+        oceT_path,
+        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid
+    )
 
-    ocnew = grid.HFacC * np.exp(oA0 + oA1*aTS + oA2*aTS2 + oA3*aTS3 + oA4*aTS4 + oA5*aTS5
-        + S*(oB0 + oB1*aTS + oB2*aTS2 + oB3*aTS3) + oC0*(S*S))
+    # --- extract salinity and temperature
+    S = pick_time(oceS.SALT, indT)
+    T = pick_time(oceT.THETA, indT)
 
-    ### Saturation concentration of dissolved O2 (mol/m3)
-    return ocnew/22391.6*1000.0
+    # --- coefficients
+    oA0 =  2.00907
+    oA1 =  3.22014
+    oA2 =  4.05010
+    oA3 =  4.94457
+    oA4 = -2.56847E-1
+    oA5 =  3.88767
+
+    oB0 = -6.24523E-3
+    oB1 = -7.37614E-3
+    oB2 = -1.03410E-2
+    oB3 = -8.17083E-3
+
+    oC0 = -4.88682E-7
+
+    # --- Garcia and Gordon type formulation
+    aTT  = 298.15 - T
+    aTK  = 273.15 + T
+    aTS  = np.log(aTT / aTK)
+    aTS2 = aTS * aTS
+    aTS3 = aTS2 * aTS
+    aTS4 = aTS3 * aTS
+    aTS5 = aTS4 * aTS
+
+    sat_ml_l = grid.HFacC * np.exp(
+        oA0
+        + oA1 * aTS
+        + oA2 * aTS2
+        + oA3 * aTS3
+        + oA4 * aTS4
+        + oA5 * aTS5
+        + S * (oB0 + oB1 * aTS + oB2 * aTS2 + oB3 * aTS3)
+        + oC0 * S**2
+    )
+
+    # Convert from ml/l to mol/m3
+    satO2 = sat_ml_l / 22391.6 * 1000.0
+
+    satO2.name = "satO2"
+    satO2.attrs["units"] = "mol/m3"
+    satO2.attrs["long_name"] = "Oxygen saturation concentration"
+
+    return satO2
 
 def MRL_alk(dirF, indT, dirS=None):
     """Compute the multilinear regression Alk_surf = a1 + a2 * SSS + a3 * PO_surf

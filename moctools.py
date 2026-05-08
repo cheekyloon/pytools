@@ -11,43 +11,76 @@ from .utils   import open_nc
 from .utils   import pick_time
 from .utils   import join
 
-def load_ice_lat(dir_exp, indT,ilon):
+def load_ice_lat(
+    dirF: str,
+    indT: int | None = -1,
+    *,
+    ilon: int = 34,
+    grid_file: str = "grid.nc",
+    ice_file: str = "iceDiag.nc",
+):
     """
-    extract the maximum latitude of the zonal-averaged 
-    sea ice edge in the South Hemisphere (lats)
-    and the North Atlantic (latn)
-    return lats and latn 
+    Extract sea-ice edge latitudes in the Southern Hemisphere
+    and North Atlantic.
 
-    :param:
-    dir_exp: directory path 
-    ...indT: time index 
-    ...ilon: longitude index for Africa 
+    Compatible with:
+      - Dryad-style files: grid.nc, iceDiag.nc
+      - MNC-style files: grid.glob.nc, iceDiag.glob.nc
 
-    :return:
-    lats: latitude of the sea-ice in SH
-    latn: latitude of the sea-ice in NATL
+    Parameters
+    ----------
+    dirF : str
+        Directory containing grid and ice diagnostics.
+    indT : int or None
+        Time index if dimension 'T' exists. Use None for snapshots.
+    ilon : int
+        Longitude index separating Atlantic from Indo-Pacific.
+    grid_file : str
+        Preferred grid filename.
+    ice_file : str
+        Preferred ice diagnostics filename.
+
+    Returns
+    -------
+    lats : float
+        Northernmost sea-ice latitude in the Southern Hemisphere.
+    latn : float
+        Southernmost sea-ice latitude in the North Atlantic.
     """
-    ### load grid
-    grid, xgrid = mitgcm_tools.loadgrid(dir_exp + 'grid.glob.nc', basin_masks=False)
-    grid.close()
-    ### load ice fraction
-    seaice = mitgcm_tools.open_ncfile(dir_exp + 'iceDiag.glob.nc',\
-        strange_axes={'Zmd000001':'ZC','Zd000001':'ZL'},grid=grid)['SIarea'].isel(T=indT)
-    # Mask where there is no ice
+
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
+
+    ice_path = resolve_nc(dirF, ice_file, "iceDiag.glob.nc")
+    icediag = open_nc(
+        ice_path,
+        strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
+        grid=grid,
+    )
+    icediag.close()
+
+    seaice = pick_time(icediag.SIarea, indT)
+
+    # Keep only actual sea ice
     seaice = seaice.where(seaice > 0)
-    # Find latitude of ice in SH
-    # Mean over longitude (XC axis)
-    ZAI_SH = seaice.mean(dim='XC')
-    lats   = ZAI_SH.isel(YC=slice(0, 35)).where(ZAI_SH > 0, drop=True).YC.max().item()
-    # Find latitude of ice in NATL 
-    # Mean over longitude (restricted to ilon)
-    ZAI_NATL       = seaice.isel(XC=slice(0, ilon)).mean(dim='XC')
-    ZAI_NATL_north = ZAI_NATL.isel(YC=slice(35, None)).where(ZAI_NATL > 0, drop=True)
-    if ZAI_NATL_north.size > 0:
-        latn = ZAI_NATL_north.YC.min().item()
+
+    # Southern Hemisphere ice edge
+    zai_sh = seaice.mean("XC", skipna=True)
+    zai_sh = zai_sh.where(zai_sh.YC < 0, drop=True)
+
+    if zai_sh.notnull().any():
+        lats = float(zai_sh.where(zai_sh > 0, drop=True).YC.max())
     else:
-        # Default to last latitude if no ice
-        latn =  grid.YC.isel(YC=-1)
+        lats = np.nan
+
+    # North Atlantic ice edge
+    zai_natl = seaice.isel(XC=slice(0, ilon)).mean("XC", skipna=True)
+    zai_natl = zai_natl.where(zai_natl.YC > 0, drop=True)
+
+    if zai_natl.notnull().any():
+        latn = float(zai_natl.where(zai_natl > 0, drop=True).YC.min())
+    else:
+        latn = np.nan
 
     return lats, latn
 
@@ -244,7 +277,7 @@ def gen_potdens(
     # -------------------------
     oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
     ocediag = open_nc(
-        join(dirF, oce_file),
+        oce_path,
         strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
         grid=grid,
     )
@@ -273,7 +306,7 @@ def gen_potdens(
         },
     )
 
-    return sigma.where(grid.HFacC>0,0.0)
+    return sigma.where(grid.HFacC>0)
 
 def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
     """
@@ -291,7 +324,7 @@ def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
     Returns
     -------
     dsig : np.ndarray (nsig,)
-        Density classes, ordered from dense to light.
+        Density classes, ordered from light to dense.
     minsig, maxsig : float
         Min/max used to scale the bins.
     """
@@ -301,7 +334,7 @@ def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
 
     sdflog = (np.logspace(-1, 1, nsig) / 10.0) ** a
     sdf = sdflog - sdflog[-1]
-    dsig = (sdf / sdf[0]) * (maxsig - minsig) + minsig  # dense -> light
+    dsig = ((sdf / sdf[0]) * (maxsig - minsig) + minsig)[::-1]  
 
     return dsig, minsig, maxsig
 
@@ -577,7 +610,7 @@ def gen_rocsig2B_SO(
     """
     TWO BASIN CASE
     Compute residual overturning circulation in density space
-    for the Global, Atlantic and Indo-Pacific basins.
+    in the Southern Ocean for the Global basin.
 
     Compatible with:
       - standard MNC outputs (grid.glob.nc, oceDiag.glob.nc; may include T)
@@ -621,18 +654,20 @@ def gen_rocsig2B_SO(
     grid.close()
 
     # Pull grid metrics as numpy arrays
-    dxc = grid.dxF.values     
+    YC = grid.YC.values
+    YG = grid.YG.values
+    dxv = grid.dxG.values     
     dzc = grid.drF.values
-    zc  = grid.RC.values         # negative
+    zc  = grid.RC.values
+    hfacv = grid.HFacS.values 
 
     # -------------------------
     # Potential density (sigma) at Pref
     # -------------------------
-    sigma_da = gen_potdens(dirF, indT, Pref, grid_file=grid_file, oce_file=oce_file)
-    sigma_np = sigma_da.values
+    sigma = gen_potdens(dirF, indT, Pref, grid_file=grid_file, oce_file=oce_file)
 
-    ny = sigma.shape[1]
-    nx = sigma.shape[2]
+    ny = sigma.sizes["YC"]
+    nx = sigma.sizes["XC"]
 
     # --- load MLD
     surf_path = resolve_nc(dirF, surf_file, "surfDiag.glob.nc")
@@ -641,22 +676,44 @@ def gen_rocsig2B_SO(
         strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
         grid=grid
     )
-    MLD = pick_time(surfdiag.MXLDEPTH, indT)
+    MLDc = pick_time(surfdiag.MXLDEPTH, indT)
     surfdiag.close()
+    # interpolate on YG grid
+    MLDg = xgrid.interp(MLDc, axis="Y")
 
-    # --- build masks
-    SO_mask = (grid.YC <= latSO)
-    in_mld  = (grid.ZC >= -MLD)
-    keep    = SO_mask & in_mld
+    # Convert to numpy before loops
+    MLDc_np = MLDc.values
+    MLDg_np = MLDg.values
+    sigma_np = sigma.values
 
-    # --- apply mask
-    hfacc = grid.HFacC.where(keep, 0.0).values
-    sigma_subset = sigma_da.where(keep).values
+    j_idx_c = np.where(YC <= latSO)[0]
+    j_idx_g = np.where(YG <= latSO)[0]
+
+    # Mask density below the MLD on YC
+    for i in range(nx):
+        for j in j_idx_c:
+            izc = int(np.abs(zc + MLDc_np[j, i]).argmin()) 
+
+            if izc + 1 < len(zc):
+                sigma_np[izc + 1:, j, i] = np.nan
+
+    # Mask velocity below the MLD on YG
+    for i in range(nx):
+        for j in j_idx_g:
+            izg = int(np.abs(zc + MLDg_np[j, i]).argmin()) 
+
+            if izg + 1 < len(zc):
+                hfacv[izg + 1:, j, i] = 0.0
+
+    # Remove velocities north of latSO
+    j_north_g = np.where(YG > latSO)[0]
+    hfacv[:, j_north_g, :] = 0.0
 
     # -------------------------
-    # Density classes (dense -> light)
+    # Density classes 
     # -------------------------
-    dsig, minsig, maxsig = make_sigma_bins(sigma_subset, nsig=nsig, a=a)
+    sigma_SO = sigma_np[:, j_idx_c, :] 
+    dsig, minsig, maxsig = make_sigma_bins(sigma_SO, nsig=nsig, a=a)
 
     # -------------------------
     # Velocities (GM + residual)
@@ -680,34 +737,63 @@ def gen_rocsig2B_SO(
     else:
         raise ValueError("flag_roc must be 0 (vres), 1 (v), or 2 (vgm).")
 
-    # --- Convert VELO from YG to YC (ny=80) to match sigma and apply mask
-    # VELO_da dims: (ZC, YG, XC)
-    VELOc_da = xgrid.interp(VELO_da, "Y").where(keep,0.0) 
-
     # Convert to numpy for your loops
-    VELO = VELOc_da.values
+    VELO = VELO_da.values
+    VELO[hfacv == 0] = np.nan
 
+
+#    dxv = grid.dxG.values
+#    hfacv_masked = grid.HFacS.copy()
+
+#    VELO = VELO_da.values
+
+#    MLDg = xgrid.interp(MLD, axis="Y")
+
+    # Masque sous la MLD sur les faces V
+#    for i in range(nx):
+#        for j in range(len(grid.YG)):
+#            if grid.YG.isel(YG=j) <= latSO:
+#                izg = np.abs(zc + MLDg.isel(YG=j, XC=i).values).argmin()
+
+#                if izg + 1 < len(zc):
+#                    hfacv_masked.values[izg+1:, j, i] = 0
+#            else:
+#                hfacv_masked.values[:, j, i] = 0
+
+#    VELO = np.where(hfacv_masked.values > 0, VELO, np.nan)
+
+ 
     # -------------------------
     # Allocate output arrays
     # -------------------------
-    mocsig = np.zeros((nsig, ny))
+    mocsig = np.full((nsig, ny), np.nan)
 
-    # indices lat au sud de latSO
-    j_idx = np.where(grid.YC.values <= latSO)[0]
-
-    for j in j_idx:
+    for j in range(ny):
         for k in range(nsig):
             mocrho = 0.0
+            nz = 0
+
             for i in range(nx):
-                # Find index of lighter waters
-                ind = np.where(sigma_np[:, j, i] <= dsig[k])[0]
-                if ind.size:
-                    mocrho += np.nansum(VELO[ind, j, i] * dxc[j, i] * dzc[ind])
+                sig_prof = sigma.isel(YC=j, XC=i).values
 
-            # Global 
-            mocsig[k, j] = mocrho / 1e6
+                ind = np.where(sig_prof <= dsig[k])[0]
 
-    return mocsig
+                if ind.size != 0:
+                    mocrho = np.nansum([
+                        mocrho,
+                        np.nansum(VELO[ind, j, i] * dxv[j, i] * dzc[ind])
+                    ])
+                    nz += 1
+
+            if nz > 0:
+                mocsig[k, j] = mocrho / 1e6
+
+        if np.any(~np.isnan(mocsig[:, j])):
+            indnan = np.where(~np.isnan(mocsig[:, j]))[0][0]
+            mocsig[indnan, j] = 0.0
+
+
+    return mocsig, dsig
 
 def dens_rocATL(dirF, rocfile, ilat, ilon): 
     """
@@ -759,4 +845,120 @@ def dens_rocATL(dirF, rocfile, ilat, ilon):
 
     return sigmn, sigmx
 
+def gen_rocsig2B_SO_v0(
+    dirF,
+    indT=-1,
+    ilon=34,
+    Pref=2000,
+    nsig=80,
+    a=1.5,
+    *,
+    grid_file="grid.nc",
+    oce_file="oceDiag.nc",
+    surf_file="surfDiag.nc",
+):
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
+    grid.close()
 
+    dxv   = grid["dxG"].values
+    dzc   = grid["drF"].values
+    zc    = grid["RC"].values
+    hfacv = grid["HFacS"].values
+
+    ilat = 11
+
+    def find_nearest_value(array, value):
+        array = np.asarray(array)
+        return int(np.abs(array - value).argmin())
+
+    # density, using new reader
+    sigma = gen_potdens(
+        dirF,
+        indT,
+        Pref,
+        grid_file=grid_file,
+        oce_file=oce_file,
+    )
+
+    # MLD, using new reader
+    surf_path = resolve_nc(dirF, surf_file, "surfDiag.glob.nc")
+    surfdiag = open_nc(
+        surf_path,
+        strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
+        grid=grid,
+    )
+
+    MLDc = pick_time(surfdiag["MXLDEPTH"], indT)
+    MLDg = xgrid.interp(MLDc, axis="Y")
+    surfdiag.close()
+
+    ny, nx = MLDc.shape
+
+    # exact old masking logic
+    for ii in range(nx):
+        for jj in range(ilat + 2):
+            izc = find_nearest_value(zc, -MLDc.isel(YC=jj, XC=ii).values)
+
+            if izc + 1 < len(zc):
+                sigma_subset = sigma.isel(YC=jj, XC=ii)
+                sigma.isel(YC=jj, XC=ii)[:] = sigma_subset.where(
+                    sigma["ZC"] > sigma["ZC"].isel(ZC=izc + 1),
+                    np.nan,
+                )
+
+            izg = find_nearest_value(zc, -MLDg.isel(YG=jj, XC=ii).values)
+            hfacv[izg + 1 :, jj, ii] = 0
+
+    hfacv[:, ilat:, :] = 0
+
+    minsig = sigma.isel(YC=slice(0, ilat)).min().values
+    maxsig = sigma.isel(YC=slice(0, ilat)).max().values
+
+    sdflog = (np.logspace(-1, 1, nsig) / 10) ** a
+    sdf = sdflog - sdflog[-1]
+
+    dsig = ((sdf / sdf[0]) * (maxsig - minsig) + minsig)[::-1]
+
+    vgm, vres = gen_vel(
+        dirF,
+        indT,
+        grid_file=grid_file,
+        oce_file=oce_file,
+    )
+
+    VELO = vres.values
+    VELO[np.where(hfacv == 0)] = np.nan
+
+    mocsig = np.nan * np.ones((nsig, ny))
+
+    for j in range(ny):
+        for k in range(nsig):
+            mocrho = 0.0
+            zrho = 0.0
+            nz = 0
+
+            for i in range(nx):
+                zdsig = np.interp(dsig, sigma.isel(YC=j, XC=i), zc)
+
+                ind = np.where(sigma.isel(YC=j, XC=i) <= dsig[k])
+
+                if len(ind[0]) != 0:
+                    zmax = zdsig[k]
+
+                    mocrho = np.nansum([
+                        mocrho,
+                        np.nansum(VELO[ind, j, i] * dxv[j, i] * dzc[ind])
+                    ])
+
+                    zrho = np.nansum([zrho, zmax])
+                    nz = nz + 1
+
+            if nz > 0:
+                mocsig[k, j] = mocrho / 1e6
+
+        if np.any(~np.isnan(mocsig[:, j])):
+            indnan = np.where(~np.isnan(mocsig[:, j]))[0][0]
+            mocsig[indnan, j] = 0
+
+    return mocsig, dsig
