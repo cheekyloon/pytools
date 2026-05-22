@@ -65,7 +65,7 @@ def load_ice_lat(
     seaice = seaice.where(seaice > 0)
 
     # Southern Hemisphere ice edge
-    zai_sh = seaice.mean("XC", skipna=True)
+    zai_sh = seaice.mean("XC", skipna=True).compute()
     zai_sh = zai_sh.where(zai_sh.YC < 0, drop=True)
 
     if zai_sh.notnull().any():
@@ -74,7 +74,7 @@ def load_ice_lat(
         lats = np.nan
 
     # North Atlantic ice edge
-    zai_natl = seaice.isel(XC=slice(0, ilon)).mean("XC", skipna=True)
+    zai_natl = seaice.isel(XC=slice(0, ilon)).mean("XC", skipna=True).compute()
     zai_natl = zai_natl.where(zai_natl.YC > 0, drop=True)
 
     if zai_natl.notnull().any():
@@ -230,6 +230,123 @@ def gen_vel(
 
     return vgm, vres
 
+def interp_v_to_rho_grid(VELO_da, grid, xgrid, hfacc, method="transport_south_face"):
+    """
+    Interpolate meridional velocity or transport from the native
+    V-grid (YG / HFacS) onto the density grid (YC / HFacC).
+
+    Parameters
+    ----------
+    VELO_da : xarray.DataArray
+        Meridional velocity on the V-grid (typically vres, vgm, or VVELMASS).
+
+    grid : xarray.Dataset
+        MITgcm grid dataset.
+
+    xgrid : xgcm.Grid
+        xgcm grid object used for staggered-grid interpolation.
+
+    hfacc : np.ndarray
+        Cell-center ocean mask (HFacC-like) used to mask the final
+        interpolated field on the YC grid.
+
+    method : str
+        Method used to map the velocity/transport from YG to YC.
+
+        Options are:
+
+        - "wall_zero":
+            Closed V-faces are treated as V=0 before interpolation.
+            This is the closest to the native MITgcm no-normal-flow
+            wall interpretation.
+
+        - "valid_only":
+            Interpolate using only open ocean V-faces. Closed faces
+            do not contribute to the interpolation, which reduces
+            artificial damping near topography.
+
+        - "transport":
+            Interpolate volume transport (V * dx * dz) instead of
+            velocity. This is more conservative for overturning
+            circulation diagnostics.
+
+        - "transport_north_face":
+            Use the northern V-face transport directly for each YC
+            grid cell without interpolation. This preserves transport
+            amplitudes near boundaries and avoids smoothing by closed
+            faces.
+
+        - "transport_south_face":
+            Use the southern V-face transport directly for each YC
+            grid cell without interpolation.
+
+    Returns
+    -------
+    FIELD : np.ndarray
+        Interpolated velocity or transport field on the YC grid.
+
+    is_transport : bool
+        True if FIELD already includes dx*dz transport factors,
+        False if velocity still needs to be multiplied by grid metrics.
+    """
+
+    mask_v = (grid.HFacS > 0).astype(float)
+
+    if method == "wall_zero":
+        # Closed faces remain zero: wall/no-normal-flow interpretation
+        V_yc = xgrid.interp(VELO_da.where(mask_v > 0, 0.0), axis="Y")
+
+        VELO = V_yc.values
+        VELO[hfacc == 0] = np.nan
+
+        return VELO, False  # False = still need dxF*drF later
+
+    elif method == "valid_only":
+        # Ignore closed faces in the interpolation
+        num = xgrid.interp(VELO_da.where(mask_v > 0, 0.0), axis="Y")
+        den = xgrid.interp(mask_v, axis="Y")
+
+        V_yc = num / den.where(den > 0)
+
+        VELO = V_yc.values
+        VELO[hfacc == 0] = np.nan
+
+        return VELO, False  # still need dxF*drF later
+
+    elif method == "transport":
+        # Interpolate transport directly
+        transport_yg = VELO_da * grid.dxG * grid.drF
+
+        num = xgrid.interp(transport_yg.where(mask_v > 0, 0.0), axis="Y")
+        den = xgrid.interp(mask_v, axis="Y")
+
+        transport_yc = num / den.where(den > 0)
+
+        TRANSPORT = transport_yc.values
+        TRANSPORT[hfacc == 0] = np.nan
+
+        return TRANSPORT, True  # True = already includes dx*drF
+
+    elif method == "transport_north_face":
+        transport_yg = (VELO_da * grid.dxG * grid.drF).where(grid.HFacS > 0)
+
+        FIELD = transport_yg.values[:, 1:, :]
+        FIELD[hfacc == 0] = np.nan
+
+        return FIELD, True
+
+    elif method == "transport_south_face":
+        transport_yg = (VELO_da * grid.dxG * grid.drF).where(grid.HFacS > 0)
+
+        FIELD = transport_yg.values[:, :-1, :]
+        FIELD[hfacc == 0] = np.nan
+   
+        return FIELD, True
+
+    else:
+        raise ValueError("method must be 'wall_zero', 'valid_only', or 'transport'")
+
+
 def gen_potdens(
     dirF: str,
     indT: int | None = -1,
@@ -324,7 +441,7 @@ def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
     Returns
     -------
     dsig : np.ndarray (nsig,)
-        Density classes, ordered from light to dense.
+        Density classes, ordered from dense to light.
     minsig, maxsig : float
         Min/max used to scale the bins.
     """
@@ -334,7 +451,7 @@ def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
 
     sdflog = (np.logspace(-1, 1, nsig) / 10.0) ** a
     sdf = sdflog - sdflog[-1]
-    dsig = ((sdf / sdf[0]) * (maxsig - minsig) + minsig)[::-1]  
+    dsig = ((sdf / sdf[0]) * (maxsig - minsig) + minsig)  
 
     return dsig, minsig, maxsig
 
@@ -453,7 +570,6 @@ def gen_rocsig2B(
         0 -> use residual velocity vres (default)
         1 -> use Eulerian velocity v (VVELMASS)
         2 -> use GM bolus velocity vgm
-
     grid_file, oce_file : str
         Preferred Dryad filenames; function will fall back to standard *.glob.nc automatically.
 
@@ -470,9 +586,7 @@ def gen_rocsig2B(
     grid.close()
 
     # Pull grid metrics as numpy arrays
-    dxc = grid.dxF.values     
-    dzc = grid.drF.values
-    zc  = grid.RC.values         # negative
+    zc  = grid.RC.values 
 
     # -------------------------
     # Potential density (sigma) at Pref
@@ -487,7 +601,6 @@ def gen_rocsig2B(
     # Density classes (dense -> light)
     # -------------------------
     dsig, minsig, maxsig = make_sigma_bins(sigma_da.where(grid.HFacC>0).values, nsig=nsig, a=a)
-
     
     # -------------------------
     # Velocities (GM + residual)
@@ -511,12 +624,10 @@ def gen_rocsig2B(
     else:
         raise ValueError("flag_roc must be 0 (vres), 1 (v), or 2 (vgm).")
 
-    # --- Convert VELO from YG to YC (ny=80) to match sigma
-    # VELO_da dims: (ZC, YG, XC)
-    VELOc_da = xgrid.interp(VELO_da, "Y").where(grid.HFacC > 0).fillna(0.0) 
-
-    # Convert to numpy for your loops
-    VELO = VELOc_da.values
+    ## Compute the transport in each cell
+    transport       = (VELO_da * grid.dxG * grid.drF).where(grid.HFacS > 0)
+    ## Convert to numpy for your loops and get the south face
+    transport_south = transport.values[:, :-1, :]
 
     # -------------------------
     # Allocate output arrays
@@ -549,8 +660,8 @@ def gen_rocsig2B(
                 zdsig = np.interp(dsig, sigma[:, j, i], zc)
 
                 ind = np.where(sigma[:, j, i] >= dsig[k])[0]
-                if ind.size > 0:
-                    contrib = np.nansum(VELO[ind, j, i] * dxc[j, i] * dzc[ind])
+                if ind.size != 0:
+                    contrib = np.nansum(transport_south[ind, j, i])
                     mocrho += contrib
 
                     zmax = zdsig[k]
@@ -637,7 +748,6 @@ def gen_rocsig2B_SO(
         2 -> use GM bolus velocity vgm
     latSO : float
         Northern boundary latitude of the Southern Ocean channel (default -51).
-
     grid_file, oce_file, surf_file : str
         Preferred Dryad filenames; function will fall back to standard *.glob.nc automatically.
 
@@ -655,11 +765,8 @@ def gen_rocsig2B_SO(
 
     # Pull grid metrics as numpy arrays
     YC = grid.YC.values
-    YG = grid.YG.values
-    dxv = grid.dxG.values     
-    dzc = grid.drF.values
     zc  = grid.RC.values
-    hfacv = grid.HFacS.values 
+    hfacc = grid.HFacC.values.copy()
 
     # -------------------------
     # Potential density (sigma) at Pref
@@ -678,16 +785,12 @@ def gen_rocsig2B_SO(
     )
     MLDc = pick_time(surfdiag.MXLDEPTH, indT)
     surfdiag.close()
-    # interpolate on YG grid
-    MLDg = xgrid.interp(MLDc, axis="Y")
 
     # Convert to numpy before loops
     MLDc_np = MLDc.values
-    MLDg_np = MLDg.values
-    sigma_np = sigma.values
+    sigma_np = sigma.values.copy()
 
     j_idx_c = np.where(YC <= latSO)[0]
-    j_idx_g = np.where(YG <= latSO)[0]
 
     # Mask density below the MLD on YC
     for i in range(nx):
@@ -696,25 +799,18 @@ def gen_rocsig2B_SO(
 
             if izc + 1 < len(zc):
                 sigma_np[izc + 1:, j, i] = np.nan
-
-    # Mask velocity below the MLD on YG
-    for i in range(nx):
-        for j in j_idx_g:
-            izg = int(np.abs(zc + MLDg_np[j, i]).argmin()) 
-
-            if izg + 1 < len(zc):
-                hfacv[izg + 1:, j, i] = 0.0
+                hfacc[izc + 1:, j, i] = 0.0
 
     # Remove velocities north of latSO
-    j_north_g = np.where(YG > latSO)[0]
-    hfacv[:, j_north_g, :] = 0.0
+    j_north_c = np.where(YC > latSO)[0]
+    hfacc[:, j_north_c, :] = 0.0
 
     # -------------------------
     # Density classes 
     # -------------------------
     sigma_SO = sigma_np[:, j_idx_c, :] 
-    dsig, minsig, maxsig = make_sigma_bins(sigma_SO, nsig=nsig, a=a)
-
+    dsig_dense_to_light, minsig, maxsig = make_sigma_bins(sigma_SO, nsig=nsig, a=a)
+    dsig = dsig_dense_to_light[::-1]
     # -------------------------
     # Velocities (GM + residual)
     # -------------------------
@@ -737,52 +833,30 @@ def gen_rocsig2B_SO(
     else:
         raise ValueError("flag_roc must be 0 (vres), 1 (v), or 2 (vgm).")
 
-    # Convert to numpy for your loops
-    VELO = VELO_da.values
-    VELO[hfacv == 0] = np.nan
-
-
-#    dxv = grid.dxG.values
-#    hfacv_masked = grid.HFacS.copy()
-
-#    VELO = VELO_da.values
-
-#    MLDg = xgrid.interp(MLD, axis="Y")
-
-    # Masque sous la MLD sur les faces V
-#    for i in range(nx):
-#        for j in range(len(grid.YG)):
-#            if grid.YG.isel(YG=j) <= latSO:
-#                izg = np.abs(zc + MLDg.isel(YG=j, XC=i).values).argmin()
-
-#                if izg + 1 < len(zc):
-#                    hfacv_masked.values[izg+1:, j, i] = 0
-#            else:
-#                hfacv_masked.values[:, j, i] = 0
-
-#    VELO = np.where(hfacv_masked.values > 0, VELO, np.nan)
-
+    ## Compute the transport in each cell
+    transport       = (VELO_da * grid.dxG * grid.drF).where(grid.HFacS > 0)
+    ## Convert to numpy for your loops and get the south face
+    transport_south = transport.values[:, :-1, :]
+    ## Apply mask 
+    transport_south[hfacc == 0] = np.nan
  
     # -------------------------
     # Allocate output arrays
     # -------------------------
     mocsig = np.full((nsig, ny), np.nan)
 
-    for j in range(ny):
+    for j in j_idx_c:
         for k in range(nsig):
             mocrho = 0.0
             nz = 0
 
             for i in range(nx):
-                sig_prof = sigma.isel(YC=j, XC=i).values
+                sig_prof = sigma_np[:,j,i]
 
                 ind = np.where(sig_prof <= dsig[k])[0]
 
                 if ind.size != 0:
-                    mocrho = np.nansum([
-                        mocrho,
-                        np.nansum(VELO[ind, j, i] * dxv[j, i] * dzc[ind])
-                    ])
+                    mocrho += np.nansum(transport_south[ind, j, i])
                     nz += 1
 
             if nz > 0:
@@ -791,7 +865,6 @@ def gen_rocsig2B_SO(
         if np.any(~np.isnan(mocsig[:, j])):
             indnan = np.where(~np.isnan(mocsig[:, j]))[0][0]
             mocsig[indnan, j] = 0.0
-
 
     return mocsig, dsig
 
