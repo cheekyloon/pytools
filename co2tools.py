@@ -179,6 +179,110 @@ def get_satO2(
 
     return satO2
 
+def get_ScCO2(
+    dirT,
+    indT: int | None = -1,
+    grid_file="grid.nc",
+    oce_file="oceDiag.nc",
+):
+    """
+    Compute the Schmidt number for CO2 from surface temperature,
+    following the MITgcm DIC implementation.
+
+    Returns
+    -------
+    ScCO2 : xarray.DataArray
+        Surface Schmidt number for CO2 (dimensionless).
+    """
+
+    # --- load grid
+    grid_path = resolve_nc(dirT, grid_file, "grid.glob.nc")
+    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
+
+    # --- load temperature diagnostics
+    oceT_path = resolve_nc(dirT, oce_file, "oceDiag.glob.nc")
+    oceT = open_nc(
+        oceT_path,
+        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid,
+    )
+
+    # --- surface temperature
+    T = pick_time(oceT.THETA, indT).isel(ZC=0)
+
+    # --- Schmidt number coefficients for CO2
+    # from MITgcm DIC package
+    sca1 = 2073.1
+    sca2 = -125.62
+    sca3 = 3.6276
+    sca4 = -0.043219
+
+    # --- Schmidt number
+    ScCO2 = (
+        sca1
+        + sca2 * T
+        + sca3 * T**2
+        + sca4 * T**3
+    )
+
+    # --- avoid negative values at high temperature
+    ScCO2 = xr.where(ScCO2 < 1.0e-2, 1.0e-2, ScCO2)
+
+    # --- mask land
+    ScCO2 = ScCO2.where(grid.HFacC.isel(ZC=0) > 0)
+
+    ScCO2.name = "ScCO2"
+    ScCO2.attrs["units"] = "1"
+    ScCO2.attrs["long_name"] = "Schmidt number for CO2"
+
+    return ScCO2
+
+def get_ScO2(
+    dirT,
+    indT: int | None = -1,
+    grid_file="grid.nc",
+    oce_file="oceDiag.nc",
+):
+    """
+    Compute the Schmidt number for O2 from surface temperature,
+    following the MITgcm O2_SURFFORCING formulation.
+
+    Returns
+    -------
+    ScO2 : xarray.DataArray
+        Surface Schmidt number for O2, dimensionless.
+    """
+
+    # --- load grid
+    grid_path = resolve_nc(dirT, grid_file, "grid.glob.nc")
+    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
+
+    # --- load temperature diagnostics
+    oceT_path = resolve_nc(dirT, oce_file, "oceDiag.glob.nc")
+    oceT = open_nc(
+        oceT_path,
+        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid,
+    )
+
+    # --- surface temperature
+    T = pick_time(oceT.THETA, indT).isel(ZC=0)
+
+    # --- Keeling et al. (1998) coefficients, as in O2_SURFFORCING
+    sox1 = 1638.0
+    sox2 = -81.83
+    sox3 = 1.483
+    sox4 = -0.008004
+
+    ScO2 = sox1 + sox2 * T + sox3 * T**2 + sox4 * T**3
+
+    ScO2 = ScO2.where(grid.HFacC.isel(ZC=0) > 0)
+    ScO2.name = "ScO2"
+    ScO2.attrs["units"] = "1"
+    ScO2.attrs["long_name"] = "Schmidt number for O2"
+
+    return ScO2
+
 def MRL_alk(dirF, indT, dirS=None):
     """Compute the multilinear regression Alk_surf = a1 + a2 * SSS + a3 * PO_surf
     to obtain preformed Alkalinity. PO = O2 + 170 * PO4. 
