@@ -455,6 +455,29 @@ def make_sigma_bins(sigma, nsig: int = 80, a: float = 1.5):
 
     return dsig, minsig, maxsig
 
+def interp_dsig_to_z(dsig, sig_prof, zc):
+    valid = np.isfinite(sig_prof) & np.isfinite(zc)
+
+    if valid.sum() < 2:
+        return np.full_like(dsig, np.nan, dtype=float)
+
+    s = sig_prof[valid]
+    z = zc[valid]
+
+    # Sort by sigma because np.interp requires increasing x
+    order = np.argsort(s)
+    s = s[order]
+    z = z[order]
+
+    # Remove duplicate sigma values to avoid weird behavior
+    s_unique, idx = np.unique(s, return_index=True)
+    z_unique = z[idx]
+
+    if len(s_unique) < 2:
+        return np.full_like(dsig, np.nan, dtype=float)
+
+    return np.interp(dsig, s_unique, z_unique, left=np.nan, right=np.nan)
+
 def enforce_monotonic_z(zcol, fill_depth):
     """
     Enforce z[k+1] >= z[k] for a 1D vertical coordinate profile (dense -> light),
@@ -491,6 +514,70 @@ def enforce_monotonic_z(zcol, fill_depth):
 
     # Put back: keep fixed valid values, keep fill_depth for missing
     z[mask_valid] = z_work[mask_valid]
+    return z
+
+def fix_depth_inversions_legacy_basin(zcol):
+    """
+    Reproduce the legacy inversion correction used for zsigA and zsigIPAC.
+    z is negative, ordered from dense to light.
+    """
+    z = zcol.copy()
+
+    nsig = len(z)
+
+    # First pass: if next level is spuriously at the surface (-10), replace by previous value
+    for k in range(nsig - 1):
+        if z[k + 1] < z[k]:
+            if z[k + 1] == -10:
+                z[k + 1] = z[k]
+
+    # Second pass: smooth inversion segments
+    for k in range(1, nsig)[::-1]:
+        if z[k - 1] > z[k]:
+            k1 = k - 1
+
+            while k1 > 0 and z[k1] > z[k]:
+                k1 -= 1
+
+            # Need valid bounds
+            if k1 - 1 < 0 or k + 1 >= nsig:
+                continue
+
+            dz = (z[k1 - 1] - z[k + 1]) / (k + 1 - (k1 - 1))
+
+            for kk in range(k1, k + 1)[::-1]:
+                z[kk] = z[kk + 1] + dz
+
+    return z
+
+def fix_depth_inversions_legacy_global(zcol):
+    """
+    Reproduce the legacy inversion correction used for zsig.
+    z is negative, ordered from dense to light.
+    """
+    z = zcol.copy()
+    nsig = len(z)
+
+    for k in range(nsig - 1):
+        if z[k + 1] < z[k]:
+            if z[k + 1] == -10:
+                z[k + 1] = z[k]
+
+    for k in range(1, nsig)[::-1]:
+        if z[k - 1] > z[k]:
+            k1 = k - 1
+
+            while k1 > 0 and z[k1] > z[k]:
+                k1 -= 1
+
+            if k1 - 1 < 0 or k + 2 >= nsig:
+                continue
+
+            dz = (z[k1 - 1] - z[k + 2]) / (k + 2 - (k1 - 1))
+
+            for kk in range(k1, k + 2)[::-1]:
+                z[kk] = z[kk + 1] + dz
+
     return z
 
 def gen_rocz(dirF, indT, ilon):
@@ -536,7 +623,7 @@ def gen_rocsig2B(
     ilon: int = 34,
     Pref: float = 2000,
     nsig: int = 80,
-    a: float = 1.5,
+    a: float = 1.45,
     flag_roc: int = 0,
     *,
     grid_file="grid.nc",
@@ -649,36 +736,41 @@ def gen_rocsig2B(
     for k in range(nsig):
         for j in range(ny):
             mocrho     = 0.0
+            mocrhoA    = 0.0
             mocrhoIPAC = 0.0
             zrho       = 0.0
+            zrhoA      = 0.0
             zrhoIPAC   = 0.0
             nz         = 0
+            nzA        = 0
             nzIPAC     = 0
 
             for i in range(nx):
+
                 # Interpolate density bins to depths at this (j,i)
                 zdsig = np.interp(dsig, sigma[:, j, i], zc)
-
+ 
                 ind = np.where(sigma[:, j, i] >= dsig[k])[0]
                 if ind.size != 0:
                     contrib = np.nansum(transport_south[ind, j, i])
-                    mocrho += contrib
-
                     zmax = zdsig[k]
+
+                    # Global
+                    mocrho += contrib
                     zrho += zmax
                     nz += 1
 
-                    if i > ilon - 1:
-                        mocrhoIPAC += contrib
-                        zrhoIPAC += zmax
-                        nzIPAC += 1
+                    # Atlantic
+                    if 0 < i < 33:
+                       mocrhoA += contrib
+                       zrhoA += zmax
+                       nzA += 1
 
-                if i == ilon - 1:
-                    if nz == 0:
-                        zsigA[k, j] = fill_depth 
-                    else:
-                        zsigA[k, j] = zrho / nz
-                        mocsigA[k, j] = -mocrho / 1e6
+                    # Indo-Pacific
+                    if i > 33:
+                       mocrhoIPAC += contrib
+                       zrhoIPAC += zmax
+                       nzIPAC += 1
 
             # Global
             if nz == 0:
@@ -686,6 +778,13 @@ def gen_rocsig2B(
             else:
                 zsig[k, j] = zrho / nz
                 mocsig[k, j] = -mocrho / 1e6
+
+            # ATL
+            if nzA == 0:
+                zsigA[k, j] = fill_depth
+            else:
+                zsigA[k, j] = zrhoA / nzA
+                mocsigA[k, j] = -mocrhoA / 1e6
 
             # IPAC
             if nzIPAC == 0:
@@ -698,9 +797,13 @@ def gen_rocsig2B(
     # Fix depth inversions 
     # -------------------------
     for j in range(ny):
-        zsig[:, j]     = enforce_monotonic_z(zsig[:, j], fill_depth)
-        zsigA[:, j]    = enforce_monotonic_z(zsigA[:, j], fill_depth)
-        zsigIPAC[:, j] = enforce_monotonic_z(zsigIPAC[:, j], fill_depth)
+        zsig[:, j] = fix_depth_inversions_legacy_global(zsig[:, j])
+        zsigA[:, j] = fix_depth_inversions_legacy_basin(zsigA[:, j])
+        zsigIPAC[:, j] = fix_depth_inversions_legacy_basin(zsigIPAC[:, j])
+#    for j in range(ny):
+#        zsig[:, j]     = enforce_monotonic_z(zsig[:, j], fill_depth)
+#        zsigA[:, j]    = enforce_monotonic_z(zsigA[:, j], fill_depth)
+#        zsigIPAC[:, j] = enforce_monotonic_z(zsigIPAC[:, j], fill_depth)
 
     return mocsig, mocsigA, mocsigIPAC, zsig, zsigA, zsigIPAC
 
@@ -710,7 +813,7 @@ def gen_rocsig2B_SO(
     ilon: int = 34,
     Pref: float = 2000,
     nsig: int = 80,
-    a: float = 1.5,
+    a: float = 1.45,
     flag_roc: int = 0,
     latSO: float = -51,
     *,
@@ -917,121 +1020,3 @@ def dens_rocATL(dirF, rocfile, ilat, ilon):
        sigmx = tmp
 
     return sigmn, sigmx
-
-def gen_rocsig2B_SO_v0(
-    dirF,
-    indT=-1,
-    ilon=34,
-    Pref=2000,
-    nsig=80,
-    a=1.5,
-    *,
-    grid_file="grid.nc",
-    oce_file="oceDiag.nc",
-    surf_file="surfDiag.nc",
-):
-    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
-    grid, xgrid = mitgcm_tools.loadgrid(grid_path, basin_masks=False)
-    grid.close()
-
-    dxv   = grid["dxG"].values
-    dzc   = grid["drF"].values
-    zc    = grid["RC"].values
-    hfacv = grid["HFacS"].values
-
-    ilat = 11
-
-    def find_nearest_value(array, value):
-        array = np.asarray(array)
-        return int(np.abs(array - value).argmin())
-
-    # density, using new reader
-    sigma = gen_potdens(
-        dirF,
-        indT,
-        Pref,
-        grid_file=grid_file,
-        oce_file=oce_file,
-    )
-
-    # MLD, using new reader
-    surf_path = resolve_nc(dirF, surf_file, "surfDiag.glob.nc")
-    surfdiag = open_nc(
-        surf_path,
-        strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
-        grid=grid,
-    )
-
-    MLDc = pick_time(surfdiag["MXLDEPTH"], indT)
-    MLDg = xgrid.interp(MLDc, axis="Y")
-    surfdiag.close()
-
-    ny, nx = MLDc.shape
-
-    # exact old masking logic
-    for ii in range(nx):
-        for jj in range(ilat + 2):
-            izc = find_nearest_value(zc, -MLDc.isel(YC=jj, XC=ii).values)
-
-            if izc + 1 < len(zc):
-                sigma_subset = sigma.isel(YC=jj, XC=ii)
-                sigma.isel(YC=jj, XC=ii)[:] = sigma_subset.where(
-                    sigma["ZC"] > sigma["ZC"].isel(ZC=izc + 1),
-                    np.nan,
-                )
-
-            izg = find_nearest_value(zc, -MLDg.isel(YG=jj, XC=ii).values)
-            hfacv[izg + 1 :, jj, ii] = 0
-
-    hfacv[:, ilat:, :] = 0
-
-    minsig = sigma.isel(YC=slice(0, ilat)).min().values
-    maxsig = sigma.isel(YC=slice(0, ilat)).max().values
-
-    sdflog = (np.logspace(-1, 1, nsig) / 10) ** a
-    sdf = sdflog - sdflog[-1]
-
-    dsig = ((sdf / sdf[0]) * (maxsig - minsig) + minsig)[::-1]
-
-    vgm, vres = gen_vel(
-        dirF,
-        indT,
-        grid_file=grid_file,
-        oce_file=oce_file,
-    )
-
-    VELO = vres.values
-    VELO[np.where(hfacv == 0)] = np.nan
-
-    mocsig = np.nan * np.ones((nsig, ny))
-
-    for j in range(ny):
-        for k in range(nsig):
-            mocrho = 0.0
-            zrho = 0.0
-            nz = 0
-
-            for i in range(nx):
-                zdsig = np.interp(dsig, sigma.isel(YC=j, XC=i), zc)
-
-                ind = np.where(sigma.isel(YC=j, XC=i) <= dsig[k])
-
-                if len(ind[0]) != 0:
-                    zmax = zdsig[k]
-
-                    mocrho = np.nansum([
-                        mocrho,
-                        np.nansum(VELO[ind, j, i] * dxv[j, i] * dzc[ind])
-                    ])
-
-                    zrho = np.nansum([zrho, zmax])
-                    nz = nz + 1
-
-            if nz > 0:
-                mocsig[k, j] = mocrho / 1e6
-
-        if np.any(~np.isnan(mocsig[:, j])):
-            indnan = np.where(~np.isnan(mocsig[:, j]))[0][0]
-            mocsig[indnan, j] = 0
-
-    return mocsig, dsig
