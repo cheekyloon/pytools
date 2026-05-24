@@ -971,6 +971,59 @@ def gen_rocsig2B_SO(
 
     return mocsig, dsig
 
+def get_roc_extrema(ds, zmax_upper=-600, zmin_upper=-1000,
+                    latmax=30, latmin=-51,
+                    rocmax_var="rocsigA", zmax_var="zsigA",
+                    rocmin_var="rocsig",  zmin_var="zsig"):
+    """
+    Compute max/min overturning values in selected regions.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing rocsig and zsig fields.
+
+    zmax_upper : float
+        Upper depth threshold (m) for rocmax region (default -600 m).
+
+    zmin_upper : float
+        Upper depth threshold (m) for rocmin region (default -1000 m).
+
+    latmax : float
+        Southern latitude bound for rocmax region (default 30°N).
+
+    latmin : float
+        Southern latitude bound for rocmin region (default -51°).
+
+    rocmax_var, zmax_var : str
+        Variable names used for the maximum calculation.
+
+    rocmin_var, zmin_var : str
+        Variable names used for the minimum calculation.
+
+    Returns
+    -------
+    rocmax, rocmin : float
+    """
+
+    # --- maximum ---
+    indy1 = np.where(ds.YC > latmax)[0]
+    indz1 = np.where(ds[zmax_var].values[:, indy1] < zmax_upper)
+
+    rocmax = float(
+        np.nanmax(ds[rocmax_var].values[:, indy1][indz1])
+    )
+
+    # --- minimum ---
+    indy2 = np.where(ds.YC > latmin)[0]
+    indz2 = np.where(ds[zmin_var].values[:, indy2] < zmin_upper)
+
+    rocmin = float(
+        np.nanmin(ds[rocmin_var].values[:, indy2][indz2])
+    )
+
+    return rocmax, rocmin
+
 def dens_rocATL(dirF, rocfile, ilat, ilon): 
     """
     Compute densest density upwelling in North Atlantic and density at
