@@ -94,6 +94,15 @@ def pick_time(da, ind, time_dim="T"):
         return da
     return da.isel({time_dim: ind}) if time_dim in da.dims else da
 
+def detect_vertical_axes(nc_path):
+    """Detect MITgcm vertical diagnostic dimensions."""
+    with xr.open_dataset(nc_path, decode_times=False) as ds:
+        return {
+            dim: "ZC" if dim.startswith("Zmd") else "ZL"
+            for dim in ds.sizes
+            if dim.startswith(("Zmd", "Zld"))
+        }
+
 def open_nc(path: str, strange_axes=None, grid=None) -> xr.Dataset:
     """
     Open MITgcm NetCDF file with backward compatibility.
