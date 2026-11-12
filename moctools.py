@@ -6,10 +6,7 @@ import mitgcm_tools
 import numpy             as np
 import xarray            as xr
 import MITgcmutils.jmd95 as jmd95
-from .utils   import resolve_nc
-from .utils   import open_nc
-from .utils   import pick_time
-from .utils   import join
+from .utils   import (resolve_nc, open_nc, pick_time, join, detect_vertical_axes)
 
 def load_ice_lat(
     dirF: str,
@@ -205,9 +202,10 @@ def gen_vel(
     # Load ocean diagnostics
     # -------------------------
     oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+
     ocediag = open_nc(
         oce_path,
-        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        strange_axes=detect_vertical_axes(oce_path),
         grid=grid,
     )
     ocediag.close()
@@ -223,7 +221,7 @@ def gen_vel(
     # -------------------------
     # xgrid.diff(..., 'Z') returns a vertical difference on the xgcm grid.
     # grid.drF is the vertical thickness (ZC-like), compatible with the diff output.
-    vgm = grid.HFacS * xgrid.diff(psiY, "Z", boundary="fill") / grid.drF
+    vgm = xgrid.diff(psiY, "Z", boundary="fill") / grid.drF
 
     # Residual velocity
     vres = vgm + vvel
@@ -395,7 +393,7 @@ def gen_potdens(
     oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
     ocediag = open_nc(
         oce_path,
-        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        strange_axes=detect_vertical_axes(oce_path),
         grid=grid,
     )
     ocediag.close()
@@ -617,6 +615,73 @@ def gen_rocz(dirF, indT, ilon):
  
     return rocz, roczA, roczIPAC
 
+def gen_rocz_basins(
+    dirF,
+    indT=-1,
+    flag_roc=0,
+    *,
+    grid_file="grid.glob.nc",
+    oce_file="oceDiag.glob.nc",
+):
+    """
+    Overturning circulation in depth coordinates
+    for Global, Atlantic and Indo-Pacific basins.
+
+    Parameters
+    ----------
+    dirF : str
+        Directory containing MITgcm outputs.
+    indT : int or None
+        Time index.
+
+    Returns
+    -------
+    rocz, roczA, roczIPAC : xarray.DataArray
+        Overturning streamfunctions in Sv,
+        on vertical cell centers (ZC) and meridional faces (YG).
+    """
+
+    # Load grid with basin masks
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid, _ = mitgcm_tools.loadgrid(grid_path, basin_masks=True)
+
+    # Compute residual velocity
+    vgm, vres = gen_vel(dirF, indT, grid_file=grid_file, oce_file=oce_file,)
+    # Meridional volume transport (m3/s)
+    transport = (vres * grid.dxG * grid.drF).where(grid.HFacS > 0, 0)
+
+    # Basin masks at V faces
+    maskA = grid.vmask_atlantic.isel(ZC=0) > 0
+    maskI = grid.vmask_indian.isel(ZC=0) > 0
+    maskP = grid.vmask_pacific.isel(ZC=0) > 0
+
+    maskIPAC = maskI | maskP
+
+    # Assign unclassified wet faces to Atlantic
+    wet = (grid.HFacS > 0).any("ZC")
+    unassigned = wet & ~(maskA | maskIPAC)
+    maskA = maskA | unassigned
+
+    # Zonal integration (m3/s)
+    vdxdz = transport.sum("XC")
+    vdxdzA = transport.where(maskA, 0).sum("XC")
+    vdxdzIPAC = transport.where(maskIPAC, 0).sum("XC")
+
+    # Bottom-to-surface integration (Sv)
+    rocz = -vdxdz.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
+        ZC=slice(None, None, -1)
+    ) / 1e6
+
+    roczA = -vdxdzA.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
+        ZC=slice(None, None, -1)
+    ) / 1e6
+
+    roczIPAC = -vdxdzIPAC.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
+        ZC=slice(None, None, -1)
+    ) / 1e6
+
+    return rocz, roczA, roczIPAC
+
 def gen_rocsig2B(
     dirF,
     indT: int | None = -1,
@@ -805,7 +870,7 @@ def gen_rocsig2B(
 #        zsigA[:, j]    = enforce_monotonic_z(zsigA[:, j], fill_depth)
 #        zsigIPAC[:, j] = enforce_monotonic_z(zsigIPAC[:, j], fill_depth)
 
-    return mocsig, mocsigA, mocsigIPAC, zsig, zsigA, zsigIPAC
+    return dsig, mocsig, mocsigA, mocsigIPAC, zsig, zsigA, zsigIPAC
 
 def gen_rocsig2B_SO(
     dirF,
@@ -970,6 +1035,182 @@ def gen_rocsig2B_SO(
             mocsig[indnan, j] = 0.0
 
     return mocsig, dsig
+
+def gen_rocsig_basins(
+    dirF,
+    indT=-1,
+    Pref=2000,
+    nsig=80,
+    a=1.5,
+    flag_roc=0,
+    *,
+    grid_file="grid.glob.nc",
+    oce_file="oceDiag.glob.nc",
+):
+    """
+    Residual overturning in potential-density coordinates
+    for Global, Atlantic and Indo-Pacific basins.
+
+    Returns
+    -------
+    dsig, mocsig, mocsigA, mocsigIPAC,
+          zsig, zsigA, zsigIPAC
+    """
+
+    grid_path = resolve_nc(dirF, grid_file, "grid.glob.nc")
+    grid, _ = mitgcm_tools.loadgrid(grid_path, basin_masks=True)
+
+    zc = grid.RC.values
+
+    sigma_da = gen_potdens(
+        dirF, indT, Pref,
+        grid_file=grid_file, oce_file=oce_file
+    )
+    sigma = sigma_da.transpose("ZC", "YC", "XC").values
+    ns, ny, nx = sigma.shape
+
+    dsig, _, _ = make_sigma_bins(sigma_da, nsig=nsig, a=a)
+
+    vgm_da, vres_da = gen_vel(
+        dirF, indT, grid_file=grid_file, oce_file=oce_file
+    )
+
+    if flag_roc == 0:
+        velocity = vres_da
+    elif flag_roc == 2:
+        velocity = vgm_da
+    elif flag_roc == 1:
+        oce_path = resolve_nc(dirF, oce_file, "oceDiag.glob.nc")
+        ocediag = open_nc(
+            oce_path,
+            strange_axes={"Zmd000044": "ZC", "Zld000044": "ZL"},
+            grid=grid,
+        )
+        velocity = pick_time(ocediag.VVELMASS, indT)
+    else:
+        raise ValueError("flag_roc must be 0, 1 or 2")
+
+    # Meridional volume transport (m3/s)
+    transport = (
+        velocity * grid.dxG * grid.drF
+    ).where(grid.HFacS > 0)
+
+    transport_south = transport.transpose(
+        "ZC", "YG", "XC"
+    ).values[:, :-1, :]
+
+    # Basin masks at meridional velocity faces
+    maskA = (
+        grid.vmask_atlantic.isel(ZC=0)
+        .transpose("YG", "XC").values[:-1, :] > 0
+    )
+    maskI = (
+        grid.vmask_indian.isel(ZC=0)
+        .transpose("YG", "XC").values[:-1, :] > 0
+    )
+    maskP = (
+        grid.vmask_pacific.isel(ZC=0)
+        .transpose("YG", "XC").values[:-1, :] > 0
+    )
+    maskIPAC = maskI | maskP
+
+    # Verify basin partition on wet V faces
+    wet = np.any(grid.HFacS.values[:, :-1, :] > 0, axis=0)
+
+    # Assign previously unclassified wet northern faces to Atlantic
+    unassigned = wet & ~(maskA | maskIPAC)
+    maskA = maskA | unassigned
+
+    # Allocate arrays
+    mocsig = np.zeros((nsig, ny))
+    mocsigA = np.zeros((nsig, ny))
+    mocsigIPAC = np.zeros((nsig, ny))
+
+    zsig = np.full((nsig, ny), np.nan)
+    zsigA = np.full((nsig, ny), np.nan)
+    zsigIPAC = np.full((nsig, ny), np.nan)
+
+    nz = np.zeros((nsig, ny), dtype=int)
+    nzA = np.zeros((nsig, ny), dtype=int)
+    nzIPAC = np.zeros((nsig, ny), dtype=int)
+
+    fill_depth = np.nanmin(zc)
+
+    for j in range(ny):
+        for i in range(nx):
+
+            sig_prof = sigma[:, j, i]
+            valid = np.isfinite(sig_prof)
+
+            if not np.any(valid):
+                continue
+
+            # Density thresholds mapped to depth
+            zdsig = np.interp(dsig, sig_prof[valid], zc[valid])
+            #sig_sorted = np.sort(sig_prof[valid])
+
+            #zdsig = np.interp(
+            #    dsig,
+            #    sig_sorted,
+            #    zc[valid],
+            #)
+
+            for k in range(nsig):
+                ind = np.where(valid & (sig_prof >= dsig[k]))[0]
+                if ind.size == 0:
+                    continue
+
+                contrib = np.nansum(transport_south[ind, j, i]) / 1e6
+
+                # Global
+                mocsig[k, j] -= contrib
+                zsig[k, j] = (0.0 if np.isnan(zsig[k, j]) else zsig[k, j]) + zdsig[k]
+                nz[k, j] += 1
+
+                # Atlantic
+                if maskA[j, i]:
+                    mocsigA[k, j] -= contrib
+                    zsigA[k, j] = (0.0 if np.isnan(zsigA[k, j])else zsigA[k, j]) + zdsig[k]
+                    nzA[k, j] += 1
+
+                # Indo-Pacific
+                if maskIPAC[j, i]:
+                    mocsigIPAC[k, j] -= contrib
+                    zsigIPAC[k, j] = (0.0 if np.isnan(zsigIPAC[k, j])else zsigIPAC[k, j]) + zdsig[k]
+                    nzIPAC[k, j] += 1
+
+
+    # Mean equivalent depths
+    for j in range(ny):
+        for k in range(nsig):
+
+            if nz[k, j] > 0:
+                zsig[k, j] /= nz[k, j]
+            else:
+                zsig[k, j] = fill_depth
+
+            if nzA[k, j] > 0:
+                zsigA[k, j] /= nzA[k, j]
+            else:
+                zsigA[k, j] = fill_depth
+
+            if nzIPAC[k, j] > 0:
+                zsigIPAC[k, j] /= nzIPAC[k, j]
+            else:
+                zsigIPAC[k, j] = fill_depth
+
+    # Fix depth inversions (legacy method)
+    for j in range(ny):
+        zsig[:, j] = fix_depth_inversions_legacy_global(zsig[:, j])
+        zsigA[:, j] = fix_depth_inversions_legacy_basin(zsigA[:, j])
+        zsigIPAC[:, j] = fix_depth_inversions_legacy_basin(zsigIPAC[:, j])
+
+    grid.close()
+    return (
+        dsig,
+        mocsig, mocsigA, mocsigIPAC,
+        zsig, zsigA, zsigIPAC
+    )
 
 def get_roc_extrema(ds, zmax_upper=-600, zmin_upper=-1000,
                     latmax=30, latmin=-51,
