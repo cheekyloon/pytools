@@ -614,57 +614,36 @@ def get_Csat_Part(
     # Load diagnostics
     # -------------------------
     oce_path_ctrl = resolve_nc(dir_oce_ctrl, oce_file, "oceDiag.glob.nc")
-    ocediag_ctrl = open_nc(
-        oce_path_ctrl,
-        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
-        grid=grid
-    )
+    ocediag_ctrl = open_nc(oce_path_ctrl, strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid)
 
     T_path = resolve_nc(dirT, oce_file, "oceDiag.glob.nc")
-    ocediagT = open_nc(
-        T_path,
-        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
-        grid=grid
-    )
+    ocediagT = open_nc(T_path, strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid)
 
     S_path = resolve_nc(dirS, oce_file, "oceDiag.glob.nc")
-    ocediagS = open_nc(
-        S_path,
-        strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
-        grid=grid
-    )
+    ocediagS = open_nc(S_path, strange_axes={"Zmd000029": "ZC", "Zld000029": "ZL"},
+        grid=grid)
 
     dic_path_ctrl = resolve_nc(dir_ctrl, dic_file, "dicDiag.glob.nc")
-    dicdiag_ctrl = open_nc(
-        dic_path_ctrl,
-        strange_axes={"Zmd000029": "ZC"},
-        grid=grid
-    )
+    dicdiag_ctrl = open_nc(dic_path_ctrl, strange_axes={"Zmd000029": "ZC"},
+        grid=grid)
 
     dic_path_exp = resolve_nc(dir_exp, dic_file, "dicDiag.glob.nc")
-    dicdiag_exp = open_nc(
-        dic_path_exp,
-        strange_axes={"Zmd000029": "ZC"},
-        grid=grid
-    )
+    dicdiag_exp = open_nc(dic_path_exp, strange_axes={"Zmd000029": "ZC"},
+        grid=grid)
 
     # Fix YC coordinate if needed
     dicdiag_ctrl.coords["YC"] = grid.YC
     dicdiag_exp.coords["YC"] = grid.YC
 
     surf_path_ctrl = resolve_nc(dir_ctrl, surf_file, "surfDiag.glob.nc")
-    surfdiag_ctrl = open_nc(
-        surf_path_ctrl,
-        strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
-        grid=grid
-    )
+    surfdiag_ctrl = open_nc(surf_path_ctrl, strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
+        grid=grid)
 
     surf_path_exp = resolve_nc(dir_exp, surf_file, "surfDiag.glob.nc")
-    surfdiag_exp = open_nc(
-        surf_path_exp,
-        strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
-        grid=grid
-    )
+    surfdiag_exp = open_nc(surf_path_exp, strange_axes={"Zmd000001": "ZC", "Zd000001": "ZL"},
+        grid=grid)
 
     # -------------------------
     # Extract S and T (handles both time-series and snapshots)
@@ -695,14 +674,12 @@ def get_Csat_Part(
     # If no time axis, pick_time is a no-op.
     # -------------------------
     if pco2_ctrl is None:
-        val = pick_time(surfdiag_ctrl.DICATCO2, indTctrl).isel(YC=0, XC=0).values
-        pCO2_ctrl = 1e6 * val
+        pCO2_ctrl = 1e6 * pick_time(surfdiag_ctrl.DICATCO2, indTctrl).isel(YC=0, XC=0).values
     else:
         pCO2_ctrl = 1e6 * pco2_ctrl
 
     if pco2 is None:
-        val = pick_time(surfdiag_exp.DICATCO2, indT).isel(YC=0, XC=0).values
-        pCO2 = 1e6 * val
+        pCO2 = 1e6 * pick_time(surfdiag_exp.DICATCO2, indT).isel(YC=0, XC=0).values
     else:
         pCO2 = 1e6 * pco2
 
@@ -834,6 +811,50 @@ def get_Csat_Part_AOU(dir_ctrl, dir_exp, dirT, dirS, indTctrl, indT=None, indTT=
     Csat_S        = grid.HFacC * calc_carbon(pCO2_ctrl, pATctrl, pPO4ctrl, pSi_ctrl, Tctrl, S,     Pdbar_ctrl) /permumolkg
 
     return Csat_ctrl, Csat, Csat_278, Csat_pCO2, Csat_pAT, Csat_T, Csat_S
+
+def get_Cdis(dirPB, dirP, dirCtrlPB, dirCtrlP, indT=-1):
+    """
+    Compute physical and biological components of disequilibrium carbon.
+
+    Cdis  = pDIC - Csat
+    CdisP = Cdis(P)
+    CdisB = Cdis(PB) - Cdis(P)
+
+    Parameters
+    ----------
+    dirPB : str
+        Physics + biogeochemistry experiment directory.
+    dirP : str
+        Physics-only experiment directory.
+    dirCtrlPB, dirCtrlP : str
+        Corresponding control experiment directories (typically PI).
+    indT : int
+        Time index (default: -1).
+
+    Returns
+    -------
+    CdisP, CdisB : xr.DataArray
+        Three-dimensional physical and biological disequilibrium
+        carbon fields [mol/m³].
+    """
+    # Physics + biogeochemistry
+    _, CsatPB, *_ = get_Csat_Part(dir_ctrl=dirCtrlPB, dir_exp=dirPB, dirT=dirPB, dirS=dirPB,
+        indTctrl=indT)
+
+    # Physics only (T and S from PB)
+    _, CsatP, *_ = get_Csat_Part(dir_ctrl=dirCtrlP, dir_exp=dirP, dirT=dirPB, dirS=dirPB,
+        dir_oce_ctrl=dirCtrlPB, indTctrl=indT)
+
+    grid, _ = mitgcm_tools.loadgrid(resolve_nc(dirPB, "grid.nc", "grid.glob.nc"), basin_masks=False)
+
+    dicPB = open_nc(resolve_nc(dirPB, "dicDiag.nc", "dicDiag.glob.nc"), strange_axes={"Zmd000029": "ZC"}, grid=grid)
+    dicP = open_nc(resolve_nc(dirP, "dicDiag.nc", "dicDiag.glob.nc"), strange_axes={"Zmd000029": "ZC"}, grid=grid)
+
+    CdisPB = pick_time(dicPB.TRAC06, indT) - CsatPB
+    CdisP = pick_time(dicP.TRAC06, indT) - CsatP
+    CdisB = CdisPB - CdisP
+
+    return CdisP, CdisB
 
 def get_Csoft(
     dirF: str,
