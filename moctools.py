@@ -6,7 +6,8 @@ import mitgcm_tools
 import numpy             as np
 import xarray            as xr
 import MITgcmutils.jmd95 as jmd95
-from .utils   import (resolve_nc, open_nc, pick_time, join, detect_vertical_axes)
+from .utils              import (resolve_nc, open_nc, pick_time, join, detect_vertical_axes)
+import matplotlib.pyplot as plt
 
 def load_ice_lat(
     dirF: str,
@@ -651,16 +652,10 @@ def gen_rocz_basins(
     transport = (vres * grid.dxG * grid.drF).where(grid.HFacS > 0, 0)
 
     # Basin masks at V faces
-    maskA = grid.vmask_atlantic.isel(ZC=0) > 0
-    maskI = grid.vmask_indian.isel(ZC=0) > 0
-    maskP = grid.vmask_pacific.isel(ZC=0) > 0
-
+    maskA = grid.vmask_atlantic > 0
+    maskI = grid.vmask_indian > 0
+    maskP = grid.vmask_pacific > 0
     maskIPAC = maskI | maskP
-
-    # Assign unclassified wet faces to Atlantic
-    wet = (grid.HFacS > 0).any("ZC")
-    unassigned = wet & ~(maskA | maskIPAC)
-    maskA = maskA | unassigned
 
     # Zonal integration (m3/s)
     vdxdz = transport.sum("XC")
@@ -668,17 +663,12 @@ def gen_rocz_basins(
     vdxdzIPAC = transport.where(maskIPAC, 0).sum("XC")
 
     # Bottom-to-surface integration (Sv)
-    rocz = -vdxdz.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
-        ZC=slice(None, None, -1)
-    ) / 1e6
+    def integrate_z(transport):
+        return -transport.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(ZC=slice(None, None, -1))/ 1e6
 
-    roczA = -vdxdzA.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
-        ZC=slice(None, None, -1)
-    ) / 1e6
-
-    roczIPAC = -vdxdzIPAC.isel(ZC=slice(None, None, -1)).cumsum("ZC").isel(
-        ZC=slice(None, None, -1)
-    ) / 1e6
+    rocz = integrate_z(vdxdz)
+    roczA = integrate_z(vdxdzA)
+    roczIPAC = integrate_z(vdxdzIPAC)
 
     return rocz, roczA, roczIPAC
 
@@ -1091,27 +1081,13 @@ def gen_rocsig_basins(
         raise ValueError("flag_roc must be 0, 1 or 2")
 
     # Meridional volume transport (m3/s)
-    transport = (
-        velocity * grid.dxG * grid.drF
-    ).where(grid.HFacS > 0)
-
-    transport_south = transport.transpose(
-        "ZC", "YG", "XC"
-    ).values[:, :-1, :]
+    transport = (velocity * grid.dxG * grid.drF).where(grid.HFacS > 0)
+    transport_south = transport.transpose("ZC", "YG", "XC").values[:, :-1, :]
 
     # Basin masks at meridional velocity faces
-    maskA = (
-        grid.vmask_atlantic.isel(ZC=0)
-        .transpose("YG", "XC").values[:-1, :] > 0
-    )
-    maskI = (
-        grid.vmask_indian.isel(ZC=0)
-        .transpose("YG", "XC").values[:-1, :] > 0
-    )
-    maskP = (
-        grid.vmask_pacific.isel(ZC=0)
-        .transpose("YG", "XC").values[:-1, :] > 0
-    )
+    maskA = (grid.vmask_atlantic > 0).transpose("ZC", "YG", "XC").values[:, :-1, :]
+    maskI = (grid.vmask_indian > 0).transpose("ZC", "YG", "XC").values[:, :-1, :]
+    maskP = (grid.vmask_pacific > 0).transpose("ZC", "YG", "XC").values[:, :-1, :]
     maskIPAC = maskI | maskP
 
     # Verify basin partition on wet V faces
@@ -1160,7 +1136,10 @@ def gen_rocsig_basins(
                 if ind.size == 0:
                     continue
 
+                # Volume transports (Sv)
                 contrib = np.nansum(transport_south[ind, j, i]) / 1e6
+                contribA = np.nansum(transport_south[ind, j, i] * maskA[ind, j, i]) / 1e6
+                contribIPAC = np.nansum(transport_south[ind, j, i] * maskIPAC[ind, j, i]) / 1e6
 
                 # Global
                 mocsig[k, j] -= contrib
@@ -1168,17 +1147,16 @@ def gen_rocsig_basins(
                 nz[k, j] += 1
 
                 # Atlantic
-                if maskA[j, i]:
-                    mocsigA[k, j] -= contrib
-                    zsigA[k, j] = (0.0 if np.isnan(zsigA[k, j])else zsigA[k, j]) + zdsig[k]
+                if np.any(maskA[:, j, i]):
+                    mocsigA[k, j] -= contribA
+                    zsigA[k, j] = (0.0 if np.isnan(zsigA[k, j]) else zsigA[k, j]) + zdsig[k]
                     nzA[k, j] += 1
 
                 # Indo-Pacific
-                if maskIPAC[j, i]:
-                    mocsigIPAC[k, j] -= contrib
-                    zsigIPAC[k, j] = (0.0 if np.isnan(zsigIPAC[k, j])else zsigIPAC[k, j]) + zdsig[k]
+                if np.any(maskIPAC[:, j, i]):
+                    mocsigIPAC[k, j] -= contribIPAC
+                    zsigIPAC[k, j] = (0.0 if np.isnan(zsigIPAC[k, j]) else zsigIPAC[k, j]) + zdsig[k]
                     nzIPAC[k, j] += 1
-
 
     # Mean equivalent depths
     for j in range(ny):
